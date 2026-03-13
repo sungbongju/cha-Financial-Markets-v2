@@ -1864,6 +1864,13 @@ function scrollChat() {
 // ═══════════════════════════════════════════
 let stsRecognition = null;
 let stsSpeaking = false;
+let stsRecognizing = false;
+
+function stsStartRecognition() {
+  if (stsRecognition && stsActive && !stsRecognizing) {
+    try { stsRecognition.start(); } catch(e) {}
+  }
+}
 
 async function toggleSTS() {
   if (stsActive) {
@@ -1889,6 +1896,12 @@ async function startSTS() {
     stsRecognition.lang = 'ko-KR';
     stsRecognition.continuous = true;
     stsRecognition.interimResults = false;
+
+    stsRecognition.onstart = () => { stsRecognizing = true; };
+    stsRecognition.onend = () => {
+      stsRecognizing = false;
+      if (stsActive && !stsSpeaking) stsStartRecognition();
+    };
 
     stsRecognition.onresult = async (e) => {
       const last = e.results[e.results.length - 1];
@@ -1948,7 +1961,7 @@ async function startSTS() {
         };
         speechSynthesis.speak(utter);
         // TTS 중에도 음성인식 유지 (interrupt 감지)
-        if (stsActive) stsRecognition.start();
+        stsStartRecognition();
 
         // navigate
         if (data.action === 'navigate' && data.categoryId) {
@@ -1959,24 +1972,15 @@ async function startSTS() {
         console.error('STS Exaone error:', err);
         statusEl.textContent = '오류가 발생했어요. 다시 말씀해 주세요.';
         updateSTSVisual('listening');
-        if (stsActive) stsRecognition.start();
+        stsStartRecognition();
       }
     };
 
     stsRecognition.onerror = (e) => {
       console.log('STS recognition error:', e.error);
-      if (e.error === 'no-speech' && stsActive && !stsSpeaking) {
-        stsRecognition.start();
-      }
     };
 
-    stsRecognition.onend = () => {
-      if (stsActive && !stsSpeaking) {
-        stsRecognition.start();
-      }
-    };
-
-    stsRecognition.start();
+    stsStartRecognition();
     stsActive = true;
     btn.textContent = '대화 종료';
     btn.classList.add('stop');
@@ -2040,13 +2044,14 @@ function updateSTSVisual(state) {
 }
 
 function stopSTS() {
+  stsActive = false;
   if (stsRecognition) {
     stsRecognition.abort();
     stsRecognition = null;
   }
   speechSynthesis.cancel();
   stsSpeaking = false;
-  stsActive = false;
+  stsRecognizing = false;
 
   document.getElementById('stsStartBtn').textContent = '음성 대화 시작';
   document.getElementById('stsStartBtn').classList.remove('stop');
