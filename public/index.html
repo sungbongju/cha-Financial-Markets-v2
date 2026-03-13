@@ -1536,7 +1536,7 @@ function saveChat(role, content, mode) {
       body: JSON.stringify({
         action: 'save_chat',
         token: token,
-        session_id: mode + '_' + chatSessionId,
+        session_id: 'v2_' + mode + '_' + chatSessionId,
         messages: [{ role: role, content: content }]
       })
     }).catch(() => {});
@@ -1545,8 +1545,6 @@ function saveChat(role, content, mode) {
 
 // STS state
 let stsActive = false;
-let stsPeerConnection = null;
-let stsDataChannel = null;
 
 // FTF state (교수님 패턴 — 직접 API + LiveKit)
 let ftfSessionInfo = null;
@@ -1862,8 +1860,11 @@ function scrollChat() {
 }
 
 // ═══════════════════════════════════════════
-// STS MODE — OpenAI Realtime WebRTC
+// STS MODE — Web Speech API + Exaone
 // ═══════════════════════════════════════════
+let stsRecognition = null;
+let stsSpeaking = false;
+
 async function toggleSTS() {
   if (stsActive) {
     stopSTS();
@@ -1877,71 +1878,107 @@ async function startSTS() {
   const statusEl = document.getElementById('stsStatus');
   const connStatus = document.getElementById('stsConnectionStatus');
 
-  btn.textContent = '연결 중...';
-  btn.disabled = true;
-  statusEl.textContent = '서버에 연결하고 있어요...';
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    statusEl.textContent = '이 브라우저는 음성인식을 지원하지 않아요. Chrome을 사용해 주세요.';
+    return;
+  }
 
   try {
-    // 1. Get ephemeral token
-    const tokenRes = await fetch('/api/realtime-token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({})
-    });
-    const tokenData = await tokenRes.json();
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    stsRecognition = new SpeechRecognition();
+    stsRecognition.lang = 'ko-KR';
+    stsRecognition.continuous = true;
+    stsRecognition.interimResults = false;
 
-    if (!tokenData.client_secret) {
-      throw new Error(tokenData.error || 'Token 발급 실패');
-    }
+    stsRecognition.onresult = async (e) => {
+      const last = e.results[e.results.length - 1];
+      if (!last.isFinal) return;
+      const text = last[0].transcript.trim();
+      if (!text) return;
 
-    // 2. Create peer connection
-    const pc = new RTCPeerConnection();
-    stsPeerConnection = pc;
+      // interrupt: AI가 말하는 중이면 끊기
+      if (stsSpeaking) {
+        speechSynthesis.cancel();
+        stsSpeaking = false;
+        console.log('[STS] Interrupt — TTS 중단');
+      }
 
-    // 3. Handle remote audio
-    const audioEl = document.createElement('audio');
-    audioEl.autoplay = true;
-    document.getElementById('stsAudioContainer').appendChild(audioEl);
+      const transcriptEl = document.getElementById('stsTranscript');
+      transcriptEl.textContent = '나: ' + text;
+      statusEl.textContent = '생각하고 있어요...';
+      updateSTSVisual('');
+      stsNavigateByText(text);
+      saveChat('user', text, 'sts');
 
-    pc.ontrack = (e) => {
-      audioEl.srcObject = e.streams[0];
-      updateSTSVisual('speaking');
-    };
-
-    // 4. Add local microphone
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    pc.addTrack(stream.getTracks()[0], stream);
-
-    // 5. Data channel for events
-    const dc = pc.createDataChannel('oai-events');
-    stsDataChannel = dc;
-
-    dc.onmessage = (e) => {
+      // 엑사원 호출
       try {
-        const event = JSON.parse(e.data);
-        handleSTSEvent(event);
-      } catch {}
+        stsRecognition.stop();
+        const res = await fetch('/api/openai-chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text, history: chatHistory.slice(-10) })
+        });
+        const data = await res.json();
+        const reply = data.reply || '응답을 받지 못했어요.';
+
+        chatHistory.push({ role: 'user', content: text });
+        chatHistory.push({ role: 'assistant', content: reply });
+
+        transcriptEl.textContent = 'AI: ' + reply;
+        statusEl.textContent = '답변하고 있어요...';
+        updateSTSVisual('speaking');
+        stsNavigateByText(reply, true);
+        saveChat('assistant', reply, 'sts');
+
+        // TTS 읽기 (interrupt 가능하도록 recognition 유지)
+        stsSpeaking = true;
+        const ttsText = data.ttsReply || reply;
+        const utter = new SpeechSynthesisUtterance(ttsText);
+        utter.lang = 'ko-KR';
+        utter.rate = 1.1;
+        utter.onend = () => {
+          stsSpeaking = false;
+          statusEl.textContent = '듣고 있어요...';
+          updateSTSVisual('listening');
+        };
+        utter.onerror = () => {
+          stsSpeaking = false;
+          statusEl.textContent = '듣고 있어요...';
+          updateSTSVisual('listening');
+        };
+        speechSynthesis.speak(utter);
+        // TTS 중에도 음성인식 유지 (interrupt 감지)
+        if (stsActive) stsRecognition.start();
+
+        // navigate
+        if (data.action === 'navigate' && data.categoryId) {
+          selectCategory(data.categoryId);
+          if (data.productName) selectProduct(data.productName);
+        }
+      } catch (err) {
+        console.error('STS Exaone error:', err);
+        statusEl.textContent = '오류가 발생했어요. 다시 말씀해 주세요.';
+        updateSTSVisual('listening');
+        if (stsActive) stsRecognition.start();
+      }
     };
 
-    // 6. Create offer and set local description
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    stsRecognition.onerror = (e) => {
+      console.log('STS recognition error:', e.error);
+      if (e.error === 'no-speech' && stsActive && !stsSpeaking) {
+        stsRecognition.start();
+      }
+    };
 
-    // 7. Send offer to OpenAI
-    const sdpRes = await fetch(`https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${tokenData.client_secret.value}`,
-        'Content-Type': 'application/sdp'
-      },
-      body: offer.sdp
-    });
-    const answerSdp = await sdpRes.text();
-    await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+    stsRecognition.onend = () => {
+      if (stsActive && !stsSpeaking) {
+        stsRecognition.start();
+      }
+    };
 
+    stsRecognition.start();
     stsActive = true;
     btn.textContent = '대화 종료';
-    btn.disabled = false;
     btn.classList.add('stop');
     statusEl.textContent = '듣고 있어요...';
     connStatus.innerHTML = '<span class="dot online"></span> 연결됨';
@@ -1951,7 +1988,6 @@ async function startSTS() {
     console.error('STS start error:', err);
     statusEl.textContent = '연결에 실패했어요: ' + err.message;
     btn.textContent = '음성 대화 시작';
-    btn.disabled = false;
   }
 }
 
@@ -1997,65 +2033,6 @@ function stsNavigateByText(text, isAiResponse = false) {
   }
 }
 
-function handleSTSEvent(event) {
-  const statusEl = document.getElementById('stsStatus');
-  const transcriptEl = document.getElementById('stsTranscript');
-
-  switch (event.type) {
-    case 'input_audio_buffer.speech_started':
-      statusEl.textContent = '듣고 있어요...';
-      updateSTSVisual('listening');
-      break;
-    case 'input_audio_buffer.speech_stopped':
-      statusEl.textContent = '생각하고 있어요...';
-      updateSTSVisual('');
-      break;
-    case 'response.audio.started':
-    case 'response.created':
-      statusEl.textContent = '답변하고 있어요...';
-      updateSTSVisual('speaking');
-      break;
-    case 'response.audio.done':
-    case 'response.done':
-      statusEl.textContent = '듣고 있어요...';
-      updateSTSVisual('listening');
-      break;
-    case 'conversation.item.input_audio_transcription.completed':
-      if (event.transcript) {
-        console.log('[STS] 사용자 전사:', event.transcript);
-        transcriptEl.textContent = '나: ' + event.transcript;
-        stsNavigateByText(event.transcript);
-        saveChat('user', event.transcript, 'sts');
-      }
-      break;
-    case 'conversation.item.input_audio_transcription.failed':
-      // interrupt 시 전사 실패 → 부분 텍스트라도 처리
-      console.log('STS transcription failed:', event);
-      break;
-    case 'response.audio_transcript.delta':
-      // AI 응답 중간 전사 (interrupt 전 마지막 텍스트 캡처)
-      if (event.delta) {
-        transcriptEl.textContent = 'AI: ' + (transcriptEl._aiBuffer = (transcriptEl._aiBuffer || '') + event.delta);
-      }
-      break;
-    case 'response.audio_transcript.done':
-      if (event.transcript) {
-        transcriptEl.textContent = 'AI: ' + event.transcript;
-        // AI 응답에서 네비게이션 (STT 오인식 보완, 사용자 전사 실패 시만)
-        stsNavigateByText(event.transcript, true);
-        saveChat('assistant', event.transcript, 'sts');
-      }
-      transcriptEl._aiBuffer = '';
-      break;
-    case 'response.cancelled':
-      // interrupt 발생 → 상태 리셋
-      statusEl.textContent = '듣고 있어요...';
-      updateSTSVisual('listening');
-      transcriptEl._aiBuffer = '';
-      break;
-  }
-}
-
 function updateSTSVisual(state) {
   const v = document.getElementById('stsVisualizer');
   v.classList.remove('listening', 'speaking');
@@ -2063,17 +2040,14 @@ function updateSTSVisual(state) {
 }
 
 function stopSTS() {
-  if (stsPeerConnection) {
-    stsPeerConnection.getSenders().forEach(s => {
-      if (s.track) s.track.stop();
-    });
-    stsPeerConnection.close();
-    stsPeerConnection = null;
+  if (stsRecognition) {
+    stsRecognition.abort();
+    stsRecognition = null;
   }
-  stsDataChannel = null;
+  speechSynthesis.cancel();
+  stsSpeaking = false;
   stsActive = false;
 
-  document.getElementById('stsAudioContainer').innerHTML = '';
   document.getElementById('stsStartBtn').textContent = '음성 대화 시작';
   document.getElementById('stsStartBtn').classList.remove('stop');
   document.getElementById('stsStatus').textContent = '시작 버튼을 눌러 음성 대화를 시작하세요';
