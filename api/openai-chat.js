@@ -247,7 +247,15 @@ export default async function handler(req, res) {
     }
 
     const data = await response.json();
-    const content = data.choices?.[0]?.message?.content || '{}';
+    let content = data.choices?.[0]?.message?.content || '{}';
+
+    // 엑사원 <thought>...</thought> 태그 제거
+    content = content.replace(/<thought>[\s\S]*?<\/thought>/g, '').trim();
+    // </thought>만 남은 경우도 제거
+    content = content.replace(/^<\/thought>\s*/g, '').trim();
+    // JSON 블록 추출 (```json ... ``` 또는 첫 번째 { ... })
+    const jsonMatch = content.match(/```json\s*([\s\S]*?)```/) || content.match(/(\{[\s\S]*\})/);
+    if (jsonMatch) content = jsonMatch[1].trim();
 
     let parsed;
     try {
