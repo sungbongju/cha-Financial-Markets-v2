@@ -1995,8 +1995,8 @@ async function startSTS() {
       console.log('STS recognition error:', e.error);
     };
 
-    stsStartRecognition();
     stsActive = true;
+    stsStartRecognition();
     btn.textContent = '대화 종료';
     btn.classList.add('stop');
     statusEl.textContent = '듣고 있어요...';
