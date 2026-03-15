@@ -201,11 +201,15 @@ export default async function handler(req, res) {
       }
 
       const data = await response.json();
-      const content = data.choices?.[0]?.message?.content || '[]';
+      let pdContent = data.choices?.[0]?.message?.content || '[]';
+      pdContent = pdContent.replace(/<thought>[\s\S]*?<\/thought>/g, '').trim();
+      pdContent = pdContent.replace(/^<\/thought>\s*/g, '').trim();
+      const pdJsonMatch = pdContent.match(/```json\s*([\s\S]*?)```/) || pdContent.match(/(\[[\s\S]*\])/) || pdContent.match(/(\{[\s\S]*\})/);
+      if (pdJsonMatch) pdContent = pdJsonMatch[1].trim();
 
       let details;
       try {
-        details = JSON.parse(content);
+        details = JSON.parse(pdContent);
       } catch {
         details = null;
       }
