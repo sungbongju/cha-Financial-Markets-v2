@@ -1867,6 +1867,81 @@ let stsSpeaking = false;
 let stsRecognizing = false;
 let stsProcessing = false;
 
+// STS 입력 처리 (콘솔에서도 호출 가능: stsProcessInput('예금 알려줘'))
+async function stsProcessInput(text) {
+  if (!text) return;
+  console.log('[STS] processInput:', text, 'speaking:', stsSpeaking, 'processing:', stsProcessing);
+
+  // interrupt: AI가 말하는 중이거나 처리 중이면 끊기
+  if (stsSpeaking || stsProcessing) {
+    speechSynthesis.cancel();
+    stsSpeaking = false;
+    stsProcessing = false;
+    console.log('[STS] Interrupt — TTS/처리 중단');
+  }
+
+  stsProcessing = true;
+  const transcriptEl = document.getElementById('stsTranscript');
+  const statusEl = document.getElementById('stsStatus');
+  transcriptEl.textContent = '나: ' + text;
+  statusEl.textContent = '생각하고 있어요...';
+  updateSTSVisual('');
+  stsNavigateByText(text);
+  saveChat('user', text, 'sts');
+
+  try {
+    const res = await fetch('/api/openai-chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text, history: chatHistory.slice(-10) })
+    });
+    const data = await res.json();
+    const reply = data.reply || '응답을 받지 못했어요.';
+
+    chatHistory.push({ role: 'user', content: text });
+    chatHistory.push({ role: 'assistant', content: reply });
+
+    transcriptEl.textContent = 'AI: ' + reply;
+    statusEl.textContent = '답변하고 있어요...';
+    updateSTSVisual('speaking');
+    stsNavigateByText(reply, true);
+    saveChat('assistant', reply, 'sts');
+
+    // TTS 읽기
+    stsSpeaking = true;
+    const ttsText = data.ttsReply || reply;
+    const utter = new SpeechSynthesisUtterance(ttsText);
+    utter.lang = 'ko-KR';
+    utter.rate = 1.1;
+    utter.onend = () => {
+      stsSpeaking = false;
+      stsProcessing = false;
+      statusEl.textContent = '듣고 있어요...';
+      updateSTSVisual('listening');
+      stsStartRecognition();
+    };
+    utter.onerror = () => {
+      stsSpeaking = false;
+      stsProcessing = false;
+      statusEl.textContent = '듣고 있어요...';
+      updateSTSVisual('listening');
+      stsStartRecognition();
+    };
+    speechSynthesis.speak(utter);
+
+    if (data.action === 'navigate' && data.categoryId) {
+      selectCategory(data.categoryId);
+      if (data.productName) selectProduct(data.productName);
+    }
+  } catch (err) {
+    console.error('[STS] Exaone error:', err);
+    stsProcessing = false;
+    statusEl.textContent = '오류가 발생했어요. 다시 말씀해 주세요.';
+    updateSTSVisual('listening');
+    stsStartRecognition();
+  }
+}
+
 function stsStartRecognition() {
   // processing/speaking 체크 없음 — TTS 중에도 마이크 열어서 interrupt 가능
   if (stsRecognition && stsActive && !stsRecognizing) {
@@ -1913,84 +1988,8 @@ async function startSTS() {
       const last = e.results[e.results.length - 1];
       if (!last.isFinal) return;
       const text = last[0].transcript.trim();
-      console.log('[STS] onresult:', text, 'speaking:', stsSpeaking, 'processing:', stsProcessing);
       if (!text) return;
-
-      // interrupt: AI가 말하는 중이거나 처리 중이면 끊기
-      if (stsSpeaking || stsProcessing) {
-        speechSynthesis.cancel();
-        stsSpeaking = false;
-        stsProcessing = false;
-        console.log('[STS] Interrupt — TTS/처리 중단');
-      }
-
-      stsProcessing = true;
-      const transcriptEl = document.getElementById('stsTranscript');
-      transcriptEl.textContent = '나: ' + text;
-      statusEl.textContent = '생각하고 있어요...';
-      updateSTSVisual('');
-      stsNavigateByText(text);
-      saveChat('user', text, 'sts');
-
-      // 엑사원 호출
-      try {
-        console.log('[STS] 엑사원 호출 시작...');
-        const res = await fetch('/api/openai-chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text, history: chatHistory.slice(-10) })
-        });
-        console.log('[STS] fetch 응답:', res.status);
-        const data = await res.json();
-        console.log('[STS] 엑사원 응답:', JSON.stringify(data).substring(0, 200));
-        const reply = data.reply || '응답을 받지 못했어요.';
-
-        chatHistory.push({ role: 'user', content: text });
-        chatHistory.push({ role: 'assistant', content: reply });
-
-        transcriptEl.textContent = 'AI: ' + reply;
-        statusEl.textContent = '답변하고 있어요...';
-        updateSTSVisual('speaking');
-        stsNavigateByText(reply, true);
-        saveChat('assistant', reply, 'sts');
-
-        // TTS 읽기
-        stsSpeaking = true;
-        const ttsText = data.ttsReply || reply;
-        console.log('[STS] TTS 시작:', ttsText.substring(0, 50));
-        const utter = new SpeechSynthesisUtterance(ttsText);
-        utter.lang = 'ko-KR';
-        utter.rate = 1.1;
-        utter.onend = () => {
-          console.log('[STS] TTS 끝');
-          stsSpeaking = false;
-          stsProcessing = false;
-          statusEl.textContent = '듣고 있어요...';
-          updateSTSVisual('listening');
-          stsStartRecognition();
-        };
-        utter.onerror = (ev) => {
-          console.log('[STS] TTS 에러:', ev.error);
-          stsSpeaking = false;
-          stsProcessing = false;
-          statusEl.textContent = '듣고 있어요...';
-          updateSTSVisual('listening');
-          stsStartRecognition();
-        };
-        speechSynthesis.speak(utter);
-
-        // navigate
-        if (data.action === 'navigate' && data.categoryId) {
-          selectCategory(data.categoryId);
-          if (data.productName) selectProduct(data.productName);
-        }
-      } catch (err) {
-        console.error('[STS] Exaone error:', err);
-        stsProcessing = false;
-        statusEl.textContent = '오류가 발생했어요. 다시 말씀해 주세요.';
-        updateSTSVisual('listening');
-        stsStartRecognition();
-      }
+      stsProcessInput(text);
     };
 
     stsRecognition.onerror = (e) => {
