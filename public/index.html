@@ -1868,7 +1868,8 @@ let stsRecognizing = false;
 let stsProcessing = false;
 
 function stsStartRecognition() {
-  if (stsRecognition && stsActive && !stsRecognizing && !stsProcessing) {
+  // processing/speaking 체크 없음 — TTS 중에도 마이크 열어서 interrupt 가능
+  if (stsRecognition && stsActive && !stsRecognizing) {
     try { stsRecognition.start(); } catch(e) {}
   }
 }
@@ -1904,8 +1905,8 @@ async function startSTS() {
     };
     stsRecognition.onend = () => {
       stsRecognizing = false;
-      console.log('[STS] recognition ended, active:', stsActive, 'speaking:', stsSpeaking, 'processing:', stsProcessing);
-      if (stsActive && !stsSpeaking && !stsProcessing) stsStartRecognition();
+      // 항상 재시작 — speaking/processing 중에도 마이크 유지하여 interrupt 가능
+      if (stsActive) stsStartRecognition();
     };
 
     stsRecognition.onresult = async (e) => {
@@ -1915,11 +1916,12 @@ async function startSTS() {
       console.log('[STS] onresult:', text, 'speaking:', stsSpeaking, 'processing:', stsProcessing);
       if (!text) return;
 
-      // interrupt: AI가 말하는 중이면 끊기
-      if (stsSpeaking) {
+      // interrupt: AI가 말하는 중이거나 처리 중이면 끊기
+      if (stsSpeaking || stsProcessing) {
         speechSynthesis.cancel();
         stsSpeaking = false;
-        console.log('[STS] Interrupt — TTS 중단');
+        stsProcessing = false;
+        console.log('[STS] Interrupt — TTS/처리 중단');
       }
 
       stsProcessing = true;
@@ -2163,7 +2165,8 @@ function ftfInitSpeechRecognition() {
 
   ftfRecognition.onend = () => {
     ftfIsListening = false;
-    if (ftfAutoListen && ftfSessionInfo && !ftfIsProcessing) {
+    // 항상 재시작 — speaking/processing 중에도 마이크 유지하여 interrupt 가능
+    if (ftfAutoListen && ftfSessionInfo) {
       setTimeout(ftfStartListening, 600);
     }
   };
@@ -2188,7 +2191,8 @@ async function ftfInterrupt() {
 }
 
 function ftfStartListening() {
-  if (!ftfRecognition || ftfIsListening || ftfIsProcessing || !ftfSessionInfo) return;
+  // isProcessing 체크 없음 — speaking 중에도 마이크 열어서 interrupt 가능
+  if (!ftfRecognition || ftfIsListening || !ftfSessionInfo) return;
   try { ftfRecognition.start(); } catch (e) {}
 }
 
@@ -2201,7 +2205,13 @@ function ftfStopListening() {
 }
 
 async function ftfProcessInput(text) {
-  if (!text || !ftfSessionInfo || ftfIsProcessing) return;
+  if (!text || !ftfSessionInfo) return;
+
+  // 이전 발화 중이면 먼저 끊기
+  if (ftfIsSpeaking || ftfIsProcessing) {
+    await ftfInterrupt();
+  }
+
   ftfIsProcessing = true;
 
   setFTFState('thinking');
@@ -2237,19 +2247,20 @@ async function ftfProcessInput(text) {
       task_type: 'repeat'
     });
 
-    // 한국어 평균 5자/초 기준 대기 (교수님 코드 그대로)
-    const speakDuration = Math.max(3000, (ttsText.length / 5) * 1000 + 1500);
+    // 폴백 타이머 (DataReceived avatar_stop_talking이 먼저 오면 취소됨)
+    const speakDuration = Math.max(4000, (ttsText.length / 5) * 1000 + 2000);
 
-    // 발화 중에도 마이크 열어서 interrupt 가능하게
+    // interrupt 대비: 500ms 후 마이크 열기
     if (ftfAutoListen && ftfSessionInfo) {
       setTimeout(ftfStartListening, 500);
     }
 
     ftfSpeakTimer = setTimeout(() => {
+      if (!ftfIsSpeaking) return;  // 이미 이벤트로 처리됨
       ftfIsSpeaking = false;
       ftfIsProcessing = false;
       if (ftfAutoListen && ftfSessionInfo) {
-        if (!ftfIsListening) ftfStartListening();
+        ftfStartListening();
         setFTFState('listening');
       } else {
         setFTFState('idle');
@@ -2317,11 +2328,31 @@ async function startFTF() {
     });
 
     // interrupt 시 트랙이 잠깐 끊겨도 화면 까매지지 않게
-    // 세션 활성 중에는 detach하지 않음 (비디오 유지)
     ftfRoom.on(lk.RoomEvent.TrackUnsubscribed, (track) => {
       if (!ftfSessionInfo) {
         track.detach(mediaEl);
       }
+    });
+
+    // ★ DataReceived: 아바타 상태 이벤트 감지 (HeyGen SDK 내부 로직과 동일)
+    ftfRoom.on(lk.RoomEvent.DataReceived, (payload) => {
+      try {
+        const msg = JSON.parse(new TextDecoder().decode(payload));
+        if (msg.type === 'avatar_start_talking') {
+          ftfIsSpeaking = true;
+          setFTFState('speaking');
+        } else if (msg.type === 'avatar_stop_talking') {
+          clearTimeout(ftfSpeakTimer);
+          ftfIsSpeaking = false;
+          ftfIsProcessing = false;
+          if (ftfAutoListen && ftfSessionInfo) {
+            setFTFState('listening');
+            ftfStartListening();
+          } else {
+            setFTFState('idle');
+          }
+        }
+      } catch(e) {}
     });
 
     await ftfRoom.connect(ftfSessionInfo.url, ftfSessionInfo.access_token);
