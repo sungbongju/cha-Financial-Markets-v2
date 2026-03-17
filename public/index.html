@@ -2113,7 +2113,7 @@ function ftfInitSpeechRecognition() {
 
   ftfRecognition.onstart = () => {
     ftfIsListening = true;
-    setFTFState('listening');
+    if (!ftfIsSpeaking) setFTFState('listening');
   };
 
   ftfRecognition.onresult = async (event) => {
@@ -2130,20 +2130,13 @@ function ftfInitSpeechRecognition() {
       }
     }
 
-    // 아바타 발화 중에 사용자가 말하면 interrupt
-    if (ftfIsSpeaking && (final.trim() || (interim.trim() && interim.trim().length > 2))) {
-      await ftfInterrupt();
-    }
-
     if (final.trim()) {
-      ftfStopListening();
+      // ftfProcessInput 내부에서 speaking 중이면 자동 interrupt
       ftfProcessInput(final.trim());
     } else if (interim) {
-      // 중간 결과 후 2초 무음이면 전송
       ftfSilenceTimer = setTimeout(() => {
         const text = interim.trim();
         if (text && text.length > 1) {
-          ftfStopListening();
           ftfProcessInput(text);
         }
       }, 2000);
@@ -2155,7 +2148,7 @@ function ftfInitSpeechRecognition() {
       alert('마이크 권한이 필요합니다.\n브라우저 주소창 왼쪽의 자물쇠 아이콘을 클릭하여 마이크를 허용해 주세요.');
       ftfAutoListen = false;
     } else if (event.error === 'no-speech') {
-      if (ftfAutoListen && ftfSessionInfo && !ftfIsProcessing) {
+      if (ftfAutoListen && ftfSessionInfo) {
         setTimeout(ftfStartListening, 500);
       }
     }
