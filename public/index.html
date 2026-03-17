@@ -1543,6 +1543,13 @@ function saveChat(role, content, mode) {
   } catch (e) {}
 }
 
+// ★ interrupt 키워드 감지 (에코 방지: speaking 중 이 키워드가 있어야만 interrupt)
+const INTERRUPT_KEYWORDS = ['잠깐','잠깐만','잠시만','아니','아니아니','아닌데','멈춰','그만','스톱','stop','다시','다른','바꿔','질문','저기','여기요'];
+function hasInterruptKeyword(text) {
+  const t = text.replace(/\s/g, '').toLowerCase();
+  return INTERRUPT_KEYWORDS.some(kw => t.includes(kw));
+}
+
 // STS state
 let stsActive = false;
 
@@ -1872,12 +1879,20 @@ async function stsProcessInput(text) {
   if (!text) return;
   console.log('[STS] processInput:', text, 'speaking:', stsSpeaking, 'processing:', stsProcessing);
 
-  // interrupt: AI가 말하는 중이거나 처리 중이면 끊기
-  if (stsSpeaking || stsProcessing) {
+  // speaking 중이면 키워드 체크 → 에코 방지
+  if (stsSpeaking) {
+    if (!hasInterruptKeyword(text)) {
+      console.log('[STS] 에코 무시 (키워드 없음):', text);
+      return;
+    }
     speechSynthesis.cancel();
     stsSpeaking = false;
     stsProcessing = false;
-    console.log('[STS] Interrupt — TTS/처리 중단');
+    console.log('[STS] 키워드 interrupt:', text);
+  } else if (stsProcessing) {
+    // processing 중 (GPT 대기)이면 키워드 없이도 새 입력 허용
+    stsProcessing = false;
+    console.log('[STS] 처리 중 새 입력');
   }
 
   stsProcessing = true;
@@ -2199,8 +2214,15 @@ function ftfStopListening() {
 async function ftfProcessInput(text) {
   if (!text || !ftfSessionInfo) return;
 
-  // 이전 발화 중이면 먼저 끊기
-  if (ftfIsSpeaking || ftfIsProcessing) {
+  // speaking 중이면 키워드 체크 → 에코 방지
+  if (ftfIsSpeaking) {
+    if (!hasInterruptKeyword(text)) {
+      console.log('[FTF] 에코 무시 (키워드 없음):', text);
+      return;
+    }
+    console.log('[FTF] 키워드 interrupt:', text);
+    await ftfInterrupt();
+  } else if (ftfIsProcessing) {
     await ftfInterrupt();
   }
 
