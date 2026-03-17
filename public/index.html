@@ -1893,7 +1893,7 @@ async function stsProcessInput(text) {
     const res = await fetch('/api/openai-chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, history: chatHistory.slice(-10) })
+      body: JSON.stringify({ message: text, history: chatHistory.slice(-4), mode: 'sts' })
     });
     const data = await res.json();
     const reply = data.reply || '응답을 받지 못했어요.';

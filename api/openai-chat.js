@@ -94,6 +94,14 @@ ${categoryList}
 7. ttsReply: 영어 약어를 한글 발음으로 변환 (ETF→이티에프, ELS→이엘에스, CMA→씨엠에이 등)`;
 }
 
+// STS 경량 프롬프트 (음성 대화용 — 짧고 빠르게)
+function buildSTSPrompt() {
+  return `금융상품 상담사. 해요체. 1-2문장으로 짧게 답변.
+JSON: {"reply":"답변","ttsReply":"TTS용(약어→한글발음)","action":"navigate/none","categoryId":"ID","productName":"상품명"}
+카테고리: deposit(예금),equity(주식),debt(채권),fund(펀드/ETF),derivative_s(ELS/ETN),derivative(선물/옵션),alternative(금/달러),trust(신탁),loan(대출),asset_mgmt(CMA/연금),insurance(보험)
+핵심: 정기예금(원금보장), 주식(시세차익+배당), 국고채(무위험), ETF(지수추종상장펀드), ELS(조건부수익), 선물(레버리지), 금(인플헤지), CMA(수시입출금), 생명보험(생명보장). 투자권유 금지.`;
+}
+
 // 상품 상세 조회용 프롬프트
 const ANALYSIS_LABELS = [
   '상품 정의', '자격 여부', '교육 여부', '예금자 보호 여부',
@@ -175,7 +183,7 @@ export default async function handler(req, res) {
   const EXAONE_MODEL = process.env.EXAONE_MODEL || 'exaone-deep-32b';
 
   try {
-    const { message, history = [], productDetail } = req.body || {};
+    const { message, history = [], productDetail, mode } = req.body || {};
 
     // ── 상품 상세 조회 모드 ──
     if (productDetail) {
@@ -223,10 +231,15 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'message is required' });
     }
 
-    const systemPrompt = buildSystemPrompt();
+    // STS 경량 모드: 짧은 prompt + 적은 토큰 + 적은 history
+    const isSTS = mode === 'sts';
+    const systemPrompt = isSTS ? buildSTSPrompt() : buildSystemPrompt();
+    const historySlice = isSTS ? history.slice(-4) : history.slice(-10);
+    const maxTokens = isSTS ? 200 : 500;
+
     const messages = [
       { role: 'system', content: systemPrompt },
-      ...history.slice(-10),
+      ...historySlice,
       { role: 'user', content: message }
     ];
 
@@ -239,7 +252,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         model: EXAONE_MODEL,
         messages,
-        max_tokens: 500,
+        max_tokens: maxTokens,
         temperature: 0
       })
     });
